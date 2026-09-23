@@ -1,5 +1,5 @@
 <template>
-  <section v-if="exhibition" class="gallery-page">
+  <section v-if="exhibition && (phase === 'open' || phase === 'permanent')" class="gallery-page">
     <div class="page-head">
       <div>
         <h1>{{ exhibition.title }}</h1>
@@ -34,12 +34,39 @@
       />
     </SceneCanvas>
   </section>
+
+  <n-result
+    v-else-if="exhibition && phase === 'upcoming'"
+    status="info"
+    :title="`展览将于 ${openDate ?? '择期'} 开放`"
+    description="未到入展日期，展厅当前不进入该场展览。"
+  >
+    <template #footer>
+      <n-button secondary @click="goOpenHall">返回今日展厅</n-button>
+    </template>
+  </n-result>
+  <n-result
+    v-else-if="exhibition && phase === 'ended'"
+    status="info"
+    title="本轮巡展已撤展"
+    description="撤展后的展品不再出现在展厅路线中。"
+  >
+    <template #footer>
+      <n-button secondary @click="goOpenHall">返回今日展厅</n-button>
+    </template>
+  </n-result>
+  <n-result
+    v-else-if="exhibition"
+    status="info"
+    title="该展览尚未发布"
+    description="草稿展览不会进入展厅，发布后才会按档期开放。"
+  />
   <n-result v-else status="404" title="展览不存在" description="请先在展览管理中创建或发布展览。" />
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import * as THREE from 'three';
 import SceneCanvas from '@/components/common/SceneCanvas.vue';
 import ArtifactPanel from '@/components/viewer/ArtifactPanel.vue';
@@ -49,11 +76,20 @@ import { useArtifactStore } from '@/stores/artifact';
 import { useExhibitionStore } from '@/stores/exhibition';
 import { useTourStore } from '@/stores/tour';
 import type { Artifact, Tour } from '@/types';
+import {
+  completeEntries,
+  formatDateValue,
+  getExhibitionPhase,
+  getOpenDate,
+  isScheduledExhibition,
+  type ExhibitionPhase
+} from '@/utils/schedule';
 import { createGalleryHall, loadArtifactObject } from '@/utils/model-loader';
 import { disposeObject3D } from '@/utils/renderer';
 import { createTourPlayer, type TourPlayerControls } from '@/utils/tour-player';
 
 const route = useRoute();
+const router = useRouter();
 const artifactStore = useArtifactStore();
 const exhibitionStore = useExhibitionStore();
 const annotationStore = useAnnotationStore();
@@ -70,13 +106,28 @@ const three = useThreeScene(containerRef, { cameraPosition: [5.5, 3.4, 8.2] });
 let sceneRoot: THREE.Group | null = null;
 let player: TourPlayerControls | null = null;
 
+const today = formatDateValue(Date.now());
+
 const exhibition = computed(() => {
   const id = String(route.params.id ?? '');
-  return exhibitionStore.getById(id) ?? exhibitionStore.exhibitions[0];
+  return exhibitionStore.getById(id) ?? exhibitionStore.openExhibitions[0] ?? exhibitionStore.exhibitions[0];
 });
 
+const phase = computed<ExhibitionPhase | undefined>(() =>
+  exhibition.value ? getExhibitionPhase(exhibition.value, today) : undefined
+);
+const openDate = computed(() => (exhibition.value ? getOpenDate(exhibition.value) : undefined));
+
+/** 展厅只进入当天开放的已发布展览：常设展展示全部展品，轮换展只保留档期内展品 */
 const artifacts = computed<Artifact[]>(() => {
-  const ids = exhibition.value?.artifactIds ?? [];
+  if (!exhibition.value) return [];
+  const activeEntries = isScheduledExhibition(exhibition.value)
+    ? completeEntries(exhibition.value, today)
+    : exhibition.value.entries;
+  const ids: string[] = [];
+  for (const entry of activeEntries) {
+    if (!ids.includes(entry.artifactId)) ids.push(entry.artifactId);
+  }
   return ids.map((id) => artifactStore.getById(id)).filter((artifact): artifact is Artifact => Boolean(artifact));
 });
 
@@ -86,7 +137,17 @@ const activeTour = computed<Tour | undefined>(() => {
   return tourStore.byExhibitionId(exhibition.value.id)[0];
 });
 
-const sceneKey = computed(() => `${three.ready.value}-${exhibition.value?.id}-${artifacts.value.map((item) => item.id).join('|')}`);
+/** 撤展后的展品不再出现在路线里：导览节点按当日在场展品过滤 */
+const tourNodes = computed(() => {
+  const tour = activeTour.value;
+  if (!tour) return [];
+  const activeIds = new Set(artifacts.value.map((artifact) => artifact.id));
+  return tour.nodes.filter((node) => activeIds.has(node.artifactId));
+});
+
+const sceneKey = computed(
+  () => `${three.ready.value}-${exhibition.value?.id}-${phase.value}-${artifacts.value.map((item) => item.id).join('|')}`
+);
 
 function onSceneReady(element: HTMLElement) {
   containerRef.value = element;
@@ -95,6 +156,7 @@ function onSceneReady(element: HTMLElement) {
 
 async function rebuildScene() {
   if (!three.ready.value || !three.scene.value || !exhibition.value) return;
+  if (phase.value !== 'open' && phase.value !== 'permanent') return;
   if (sceneRoot) {
     three.scene.value.remove(sceneRoot);
     disposeObject3D(sceneRoot);
@@ -114,7 +176,7 @@ async function rebuildScene() {
 
   sceneRoot = root;
   three.scene.value.add(root);
-  if (!selectedArtifactId.value && artifacts.value[0]) {
+  if ((!selectedArtifactId.value || !artifacts.value.some((item) => item.id === selectedArtifactId.value)) && artifacts.value[0]) {
     selectedArtifactId.value = artifacts.value[0].id;
   }
   three.render();
@@ -148,14 +210,21 @@ function toggleTour() {
     isTouring.value = false;
     return;
   }
-  if (!three.camera.value || !three.controls.value || !activeTour.value) return;
+  if (!three.camera.value || !three.controls.value || tourNodes.value.length === 0) return;
   player?.stop();
-  player = createTourPlayer(three.camera.value, three.controls.value, activeTour.value.nodes, (node) => {
+  player = createTourPlayer(three.camera.value, three.controls.value, tourNodes.value, (node) => {
     selectedArtifactId.value = node.artifactId;
     activeNarration.value = node.narration;
   });
   player.play();
   isTouring.value = true;
+}
+
+function goOpenHall() {
+  const openHall = exhibitionStore.openExhibitions[0];
+  if (openHall) {
+    router.push(`/exhibitions/${openHall.id}`);
+  }
 }
 
 watch(sceneKey, () => void rebuildScene(), { immediate: true });

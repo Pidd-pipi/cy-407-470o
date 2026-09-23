@@ -41,7 +41,9 @@ const annotationStore = useAnnotationStore();
 const tourStore = useTourStore();
 const ready = ref(false);
 
-const galleryPath = computed(() => `/exhibitions/${exhibitionStore.exhibitions[0]?.id ?? 'exhibition-heritage-hall'}`);
+const galleryPath = computed(
+  () => `/exhibitions/${exhibitionStore.openExhibitions[0]?.id ?? exhibitionStore.exhibitions[0]?.id ?? 'exhibition-heritage-hall'}`
+);
 const tourPath = computed(() => `/manage/tours/${tourStore.tours[0]?.id ?? 'tour-default-route'}`);
 
 const themeOverrides: GlobalThemeOverrides = {

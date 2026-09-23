@@ -5,11 +5,19 @@
       <strong>{{ artifactCount }} 件展品</strong>
     </div>
     <h3>{{ exhibition.title }}</h3>
+    <n-tag v-if="phase !== 'open' && phase !== 'permanent'" size="small" :bordered="false" type="warning">
+      {{ phaseHint }}
+    </n-tag>
+    <n-tag v-else size="small" :bordered="false" type="success">
+      {{ phase === 'permanent' ? '常设展' : '今日开放' }}
+    </n-tag>
     <p>{{ exhibition.intro }}</p>
     <footer>
       <span>{{ exhibition.curator }}</span>
       <div>
-        <n-button size="small" secondary @click="$emit('open', exhibition.id)">进入</n-button>
+        <n-button size="small" secondary :disabled="!canEnter" @click="$emit('open', exhibition.id)">
+          {{ enterLabel }}
+        </n-button>
         <n-button size="small" quaternary @click="$emit('edit', exhibition.id)">编辑</n-button>
       </div>
     </footer>
@@ -17,10 +25,12 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { Exhibition } from '@/types';
 import { exhibitionStatusLabels } from '@/types';
+import { getExhibitionPhase, getOpenDate } from '@/utils/schedule';
 
-defineProps<{
+const props = defineProps<{
   exhibition: Exhibition;
   artifactCount: number;
 }>();
@@ -29,6 +39,27 @@ defineEmits<{
   open: [id: string];
   edit: [id: string];
 }>();
+
+const phase = computed(() => getExhibitionPhase(props.exhibition));
+const canEnter = computed(() => phase.value === 'open' || phase.value === 'permanent');
+const openDate = computed(() => getOpenDate(props.exhibition));
+const enterLabel = computed(() => {
+  switch (phase.value) {
+    case 'draft':
+      return '未发布';
+    case 'upcoming':
+      return '未开放';
+    case 'ended':
+      return '已撤展';
+    default:
+      return '进入';
+  }
+});
+const phaseHint = computed(() => {
+  if (phase.value === 'upcoming' && openDate.value) return `${openDate.value} 开放`;
+  if (phase.value === 'ended') return '本轮巡展已结束';
+  return '尚未发布';
+});
 </script>
 
 <style scoped>
