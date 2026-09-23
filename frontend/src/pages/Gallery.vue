@@ -1,11 +1,12 @@
 <template>
-  <section v-if="exhibition" class="gallery-page">
+  <section v-if="accessState === 'open' && exhibition" class="gallery-page">
     <div class="page-head">
       <div>
         <h1>{{ exhibition.title }}</h1>
         <p>{{ exhibition.intro }}</p>
       </div>
       <div class="gallery-actions">
+        <n-tag :bordered="false" type="success">今日开放 · {{ windowText }}</n-tag>
         <n-tag :bordered="false">{{ exhibition.curator }}</n-tag>
         <n-button secondary @click="toggleTour">{{ isTouring ? '暂停导览' : '自动导览' }}</n-button>
       </div>
@@ -34,12 +35,33 @@
       />
     </SceneCanvas>
   </section>
-  <n-result v-else status="404" title="展览不存在" description="请先在展览管理中创建或发布展览。" />
+
+  <n-result
+    v-else-if="exhibition"
+    :status="closedNotice.status"
+    :title="closedNotice.title"
+    :description="closedNotice.description"
+  >
+    <template #footer>
+      <n-space>
+        <n-button type="primary" @click="router.push('/manage/exhibitions')">前往展览管理</n-button>
+        <n-button v-if="otherOpenExhibition" secondary @click="router.push(`/exhibitions/${otherOpenExhibition.id}`)">
+          进入今日开放的「{{ otherOpenExhibition.title }}」
+        </n-button>
+      </n-space>
+    </template>
+  </n-result>
+
+  <n-result v-else status="404" title="展览不存在" description="请先在展览管理中创建或发布展览。">
+    <template #footer>
+      <n-button type="primary" @click="router.push('/manage/exhibitions')">前往展览管理</n-button>
+    </template>
+  </n-result>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import * as THREE from 'three';
 import SceneCanvas from '@/components/common/SceneCanvas.vue';
 import ArtifactPanel from '@/components/viewer/ArtifactPanel.vue';
@@ -48,12 +70,22 @@ import { useAnnotationStore } from '@/stores/annotation';
 import { useArtifactStore } from '@/stores/artifact';
 import { useExhibitionStore } from '@/stores/exhibition';
 import { useTourStore } from '@/stores/tour';
-import type { Artifact, Tour } from '@/types';
+import type { Artifact, Exhibition, Tour, TourNode } from '@/types';
+import { ExhibitionStatus } from '@/types';
+import {
+  artifactsOnDate,
+  describeExhibitionWindow,
+  exhibitionClosingDate,
+  exhibitionOpeningDate,
+  exhibitionWindow,
+  isExhibitionOpen
+} from '@/utils/schedule';
 import { createGalleryHall, loadArtifactObject } from '@/utils/model-loader';
 import { disposeObject3D } from '@/utils/renderer';
 import { createTourPlayer, type TourPlayerControls } from '@/utils/tour-player';
 
 const route = useRoute();
+const router = useRouter();
 const artifactStore = useArtifactStore();
 const exhibitionStore = useExhibitionStore();
 const annotationStore = useAnnotationStore();
@@ -70,20 +102,72 @@ const three = useThreeScene(containerRef, { cameraPosition: [5.5, 3.4, 8.2] });
 let sceneRoot: THREE.Group | null = null;
 let player: TourPlayerControls | null = null;
 
-const exhibition = computed(() => {
-  const id = String(route.params.id ?? '');
-  return exhibitionStore.getById(id) ?? exhibitionStore.exhibitions[0];
+const routeExhibition = computed(() => exhibitionStore.getById(String(route.params.id ?? '')));
+// 路由未指定有效展览时，落到当天开放的展览
+const exhibition = computed<Exhibition | undefined>(
+  () => routeExhibition.value ?? exhibitionStore.openExhibitions[0] ?? exhibitionStore.exhibitions[0]
+);
+
+const accessState = computed<'open' | 'draft' | 'upcoming' | 'ended'>(() => {
+  const current = exhibition.value;
+  if (!current || current.status !== ExhibitionStatus.Published) return 'draft';
+  if (isExhibitionOpen(current)) return 'open';
+  const today = new Date();
+  const todayMs = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const { start } = exhibitionWindow(current);
+  return start > todayMs ? 'upcoming' : 'ended';
 });
 
+const otherOpenExhibition = computed(
+  () => exhibitionStore.openExhibitions.find((item) => item.id !== exhibition.value?.id)
+);
+
+const closedNotice = computed(() => {
+  const current = exhibition.value;
+  if (!current) return { status: '404' as const, title: '展览不存在', description: '' };
+  const opening = exhibitionOpeningDate(current);
+  const closing = exhibitionClosingDate(current);
+  if (current.status === ExhibitionStatus.Draft) {
+    return {
+      status: 'info' as const,
+      title: '「' + current.title + '」尚未发布',
+      description: '草稿展览不会进入展厅。请在展览管理中补全展品档期并通过发布检查。'
+    };
+  }
+  if (accessState.value === 'upcoming') {
+    return {
+      status: 'info' as const,
+      title: '「' + current.title + '」暂未开放',
+      description: `展厅仅在开放当天进入该展览，开放日期：${opening ?? '未定'}。`
+    };
+  }
+  return {
+    status: 'warning' as const,
+    title: '「' + current.title + '」已撤展',
+    description: closing ? `该展览已于 ${closing} 结束撤展，展品不再出现在展厅路线中。` : '该展览没有在展档期，展品不再出现在展厅路线中。'
+  };
+});
+
+const windowText = computed(() => (exhibition.value ? describeExhibitionWindow(exhibition.value) : ''));
+
+/** 当天在展的展品：已入展且未撤展，保持展线顺序；已撤展作品不再进入路线 */
 const artifacts = computed<Artifact[]>(() => {
-  const ids = exhibition.value?.artifactIds ?? [];
-  return ids.map((id) => artifactStore.getById(id)).filter((artifact): artifact is Artifact => Boolean(artifact));
+  if (!exhibition.value || accessState.value !== 'open') return [];
+  return artifactsOnDate(exhibition.value)
+    .map((entry) => artifactStore.getById(entry.artifactId))
+    .filter((artifact): artifact is Artifact => Boolean(artifact));
 });
 
-const selectedArtifact = computed(() => artifactStore.getById(selectedArtifactId.value ?? ''));
+const selectedArtifact = computed(() => artifacts.value.find((artifact) => artifact.id === selectedArtifactId.value));
+
 const activeTour = computed<Tour | undefined>(() => {
-  if (!exhibition.value) return undefined;
-  return tourStore.byExhibitionId(exhibition.value.id)[0];
+  if (!exhibition.value || accessState.value !== 'open') return undefined;
+  const tour = tourStore.byExhibitionId(exhibition.value.id)[0];
+  if (!tour) return undefined;
+  // 只播放当天在展展品的导览节点
+  const onDisplay = new Set(artifacts.value.map((artifact) => artifact.id));
+  const nodes = tour.nodes.filter((node) => onDisplay.has(node.artifactId));
+  return nodes.length > 0 ? { ...tour, nodes } : undefined;
 });
 
 const sceneKey = computed(() => `${three.ready.value}-${exhibition.value?.id}-${artifacts.value.map((item) => item.id).join('|')}`);
@@ -94,10 +178,11 @@ function onSceneReady(element: HTMLElement) {
 }
 
 async function rebuildScene() {
-  if (!three.ready.value || !three.scene.value || !exhibition.value) return;
+  if (!three.ready.value || !three.scene.value || !exhibition.value || accessState.value !== 'open') return;
   if (sceneRoot) {
     three.scene.value.remove(sceneRoot);
     disposeObject3D(sceneRoot);
+    sceneRoot = null;
   }
 
   const root = createGalleryHall(exhibition.value.themeColor);
@@ -114,8 +199,8 @@ async function rebuildScene() {
 
   sceneRoot = root;
   three.scene.value.add(root);
-  if (!selectedArtifactId.value && artifacts.value[0]) {
-    selectedArtifactId.value = artifacts.value[0].id;
+  if (!selectedArtifactId.value || !artifacts.value.some((artifact) => artifact.id === selectedArtifactId.value)) {
+    selectedArtifactId.value = artifacts.value[0]?.id;
   }
   three.render();
 }
@@ -150,7 +235,8 @@ function toggleTour() {
   }
   if (!three.camera.value || !three.controls.value || !activeTour.value) return;
   player?.stop();
-  player = createTourPlayer(three.camera.value, three.controls.value, activeTour.value.nodes, (node) => {
+  const nodes: TourNode[] = activeTour.value.nodes;
+  player = createTourPlayer(three.camera.value, three.controls.value, nodes, (node) => {
     selectedArtifactId.value = node.artifactId;
     activeNarration.value = node.narration;
   });

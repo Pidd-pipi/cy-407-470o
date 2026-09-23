@@ -1,11 +1,12 @@
 <template>
   <article class="exhibition-card" :style="{ '--theme': exhibition.themeColor }">
     <div class="status-line">
-      <span>{{ exhibitionStatusLabels[exhibition.status] }}</span>
+      <n-tag :bordered="false" size="small" :type="statusTagType">{{ statusText }}</n-tag>
       <strong>{{ artifactCount }} 件展品</strong>
     </div>
     <h3>{{ exhibition.title }}</h3>
     <p>{{ exhibition.intro }}</p>
+    <div class="schedule-line">{{ windowText }}</div>
     <footer>
       <span>{{ exhibition.curator }}</span>
       <div>
@@ -17,10 +18,12 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { Exhibition } from '@/types';
-import { exhibitionStatusLabels } from '@/types';
+import { ExhibitionStatus, exhibitionStatusLabels } from '@/types';
+import { describeExhibitionWindow, exhibitionOpeningDate, isExhibitionOpen } from '@/utils/schedule';
 
-defineProps<{
+const props = defineProps<{
   exhibition: Exhibition;
   artifactCount: number;
 }>();
@@ -29,6 +32,22 @@ defineEmits<{
   open: [id: string];
   edit: [id: string];
 }>();
+
+const windowText = computed(() => describeExhibitionWindow(props.exhibition));
+
+const statusText = computed(() => {
+  const label = exhibitionStatusLabels[props.exhibition.status];
+  if (props.exhibition.status === ExhibitionStatus.Draft) return label;
+  if (isExhibitionOpen(props.exhibition)) return `${label} · 今日开放`;
+  const opening = exhibitionOpeningDate(props.exhibition);
+  if (opening) return `${label} · ${opening} 开放`;
+  return `${label} · 已撤展`;
+});
+
+const statusTagType = computed<'success' | 'warning' | 'default'>(() => {
+  if (props.exhibition.status === ExhibitionStatus.Draft) return 'warning';
+  return isExhibitionOpen(props.exhibition) ? 'success' : 'default';
+});
 </script>
 
 <style scoped>
@@ -56,6 +75,11 @@ footer {
   color: var(--museum-brass);
   font-size: 13px;
   font-weight: 800;
+}
+
+.schedule-line {
+  color: rgba(31, 46, 41, 0.72);
+  font-size: 13px;
 }
 
 h3 {

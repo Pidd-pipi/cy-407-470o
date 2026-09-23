@@ -4,13 +4,18 @@ import ArtifactDetail from '@/pages/ArtifactDetail.vue';
 import ExhibitionManage from '@/pages/ExhibitionManage.vue';
 import TourEditor from '@/pages/TourEditor.vue';
 import ArtifactManage from '@/pages/ArtifactManage.vue';
+import { useExhibitionStore } from '@/stores/exhibition';
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
       path: '/',
-      redirect: '/exhibitions/exhibition-heritage-hall'
+      redirect: () => {
+        const exhibitionStore = useExhibitionStore();
+        const target = exhibitionStore.openExhibitions[0] ?? exhibitionStore.exhibitions[0];
+        return `/exhibitions/${target?.id ?? 'exhibition-heritage-hall'}`;
+      }
     },
     {
       path: '/exhibitions/:id',
